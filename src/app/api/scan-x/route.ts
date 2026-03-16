@@ -1,3 +1,10 @@
+console.log("API route invoked. Env check:", {
+  bearer: !!process.env.X_BEARER_TOKEN,
+  accessToken: !!process.env.X_ACCESS_TOKEN,
+  grok: !!process.env.GROK_API_KEY,
+});
+return NextResponse.json({ debug: "Route called - check logs" });
+
 // app/api/scan-x/route.ts
 import { NextResponse } from 'next/server';
 import axios from 'axios';
