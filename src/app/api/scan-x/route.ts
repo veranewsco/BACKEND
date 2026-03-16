@@ -1,108 +1,83 @@
-// src/app/api/scan-x/route.ts
-import { NextResponse } from 'next/server';
-import axios from 'axios';
-import { TwitterApi } from 'twitter-api-v2';
-
-const X_BEARER = process.env.X_BEARER_TOKEN!;
-const X_API_KEY = process.env.X_API_KEY!;
-const X_API_SECRET = process.env.X_API_SECRET!;
-const X_ACCESS_TOKEN = process.env.X_ACCESS_TOKEN!;
-const X_ACCESS_SECRET = process.env.X_ACCESS_SECRET!;
-const GROK_API_KEY = process.env.GROK_API_KEY!;
-
-let lastSinceId: string | null = null; // Start null to fetch latest tweets first
-
-const client = new TwitterApi({
-  appKey: X_API_KEY,
-  appSecret: X_API_SECRET,
-  accessToken: X_ACCESS_TOKEN,
-  accessSecret: X_ACCESS_SECRET,
-});
+// ... imports and constants same as before ...
 
 export async function GET() {
-  console.log("API route /scan-x invoked", {
-    bearerPresent: !!X_BEARER,
-    grokPresent: !!GROK_API_KEY,
-    accessTokenPresent: !!X_ACCESS_TOKEN,
-    lastSinceId,
-    timestamp: new Date().toISOString(),
-  });
+  console.log("API route invoked", { lastSinceId, timestamp: new Date().toISOString() });
 
   try {
-    // Build query – removed min_faves:20 (invalid in your tier)
     let queryUrl = `https://api.x.com/2/tweets/search/recent?query=breaking OR urgent OR developing lang:en -is:retweet&tweet.fields=created_at,author_id&max_results=10`;
-    if (lastSinceId) {
-      queryUrl += `&since_id=${lastSinceId}`;
-    }
+    if (lastSinceId) queryUrl += `&since_id=${lastSinceId}`;
 
     const searchRes = await axios.get(queryUrl, {
       headers: { Authorization: `Bearer ${X_BEARER}` },
     });
 
     const tweets = searchRes.data.data || [];
-    if (tweets.length === 0) {
-      return NextResponse.json({ newStories: [], message: "No new tweets found" });
-    }
+    if (tweets.length === 0) return NextResponse.json({ newStories: [], message: "No tweets" });
 
-    lastSinceId = tweets[0].id; // Update for next poll
+    lastSinceId = tweets[0].id;
+    console.log(`Found ${tweets.length} tweets, new lastSinceId: ${lastSinceId}`);
 
-    // Process tweets with Grok
     const newStories = await Promise.all(
       tweets.slice(0, 3).map(async (tweet: any) => {
+        const tweetText = tweet.text || '(empty tweet)';
+        console.log(`Processing tweet ${tweet.id}:`, tweetText.slice(0, 100) + '...');
+
         try {
+          console.log("Calling Grok API...");
           const grokRes = await axios.post(
             'https://api.x.ai/v1/chat/completions',
             {
-              model: 'grok-beta',
+              model: 'grok-beta', // Try 'grok-1' or check https://api.x.ai/docs/models for exact name
               messages: [
                 {
                   role: 'user',
-                  content: `Neutralize bias, fact-check lightly, categorize (POLITICS/WAR/SPORTS/GLOBAL), summarize in 1 neutral tweet (under 280 chars), add veraScore (0-100): ${tweet.text.slice(0, 500)}`,
+                  content: `Neutralize bias, categorize (POLITICS/WAR/SPORTS/GLOBAL), summarize in 1 short neutral tweet, add veraScore (0-100): ${tweetText.slice(0, 400)}`,
                 },
               ],
             },
-            { headers: { Authorization: `Bearer ${GROK_API_KEY}` } }
+            {
+              headers: {
+                Authorization: `Bearer ${GROK_API_KEY}`,
+                'Content-Type': 'application/json',
+              },
+            }
           );
 
-          const output = grokRes.data.choices?.[0]?.message?.content || '';
+          console.log("Grok response status:", grokRes.status);
+          const output = grokRes.data.choices?.[0]?.message?.content || 'No output';
+          console.log("Grok output:", output);
+
           const parsed = parseGrokOutput(output);
 
-          const tweetText = `${parsed.summary} 🚨 #VeraNews Neutralized from X sources.`;
-          console.log("Posting tweet:", tweetText);
-          const postRes = await client.v2.tweet(tweetText);
-          console.log("Posted:", postRes.data);
+          const finalTweet = `${parsed.summary} 🚨 #VeraNews (Score: ${parsed.score})`;
+          console.log("Posting:", finalTweet);
+
+          const postRes = await client.v2.tweet(finalTweet);
+          console.log("Posted ID:", postRes.data.id);
 
           return {
-            title: parsed.title || tweet.text.slice(0, 60) + '...',
+            title: parsed.title || tweetText.slice(0, 60) + '...',
             summary: parsed.summary,
             veraScore: parsed.score || '90',
             tweetId: postRes.data.id,
           };
         } catch (innerErr: any) {
-          console.error("Tweet processing error:", tweet.id, innerErr.message, innerErr.response?.data);
-          return { error: innerErr.message };
+          console.error("Inner error for tweet", tweet.id, {
+            message: innerErr.message,
+            status: innerErr.response?.status,
+            data: innerErr.response?.data,
+            code: innerErr.code,
+          });
+          return { error: innerErr.message, details: innerErr.response?.data };
         }
       })
     );
 
     return NextResponse.json({ newStories, lastSinceId });
   } catch (error: any) {
-    console.error("Scan-X error:", error.message, error.response?.data || error);
-    if (error.response?.data?.errors?.[0]?.message?.includes('since_id')) {
-      lastSinceId = null;
-      console.log("Invalid since_id – resetting");
-    }
-    return NextResponse.json(
-      { error: error.message, details: error.response?.data },
-      { status: error.response?.status || 500 }
-    );
+    console.error("Outer error:", error.message, error.response?.data);
+    return NextResponse.json({ error: error.message, details: error.response?.data }, { status: 500 });
   }
 }
 
-function parseGrokOutput(text: string) {
-  return {
-    title: text.match(/Title:\s*(.*)/i)?.[1]?.trim() || '',
-    summary: text.match(/Summary:\s*(.*)/i)?.[1]?.trim() || text.trim(),
-    score: text.match(/veraScore:\s*(\d+)/i)?.[1] || '90',
-  };
-}
+// parseGrokOutput same as before
