@@ -10,7 +10,7 @@ const X_ACCESS_TOKEN = process.env.X_ACCESS_TOKEN!;
 const X_ACCESS_SECRET = process.env.X_ACCESS_SECRET!;
 const GROK_API_KEY = process.env.GROK_API_KEY!;
 
-let lastSinceId = '0'; // In production: use Vercel KV, Redis, or a database to persist this
+let lastSinceId: string | null = null; // Start with null to fetch recent tweets first
 
 const client = new TwitterApi({
   appKey: X_API_KEY,
@@ -20,40 +20,41 @@ const client = new TwitterApi({
 });
 
 export async function GET() {
-  // Debug line – remove or comment out after testing
   console.log("API route /scan-x invoked", {
     bearerPresent: !!X_BEARER,
     grokPresent: !!GROK_API_KEY,
     accessTokenPresent: !!X_ACCESS_TOKEN,
+    lastSinceId,
     timestamp: new Date().toISOString(),
   });
 
-  // Optional early debug response (uncomment if you want to test route without full logic)
-  // return NextResponse.json({ debug: "Route called - check Vercel Functions logs" });
-
   try {
-    // 1. Scan recent breaking tweets
-    const searchRes = await axios.get(
-      `https://api.x.com/2/tweets/search/recent?query=breaking OR urgent OR developing lang:en -is:retweet min_faves:20&tweet.fields=created_at,author_id&max_results=10&since_id=${lastSinceId}`,
-      { headers: { Authorization: `Bearer ${X_BEARER}` } }
-    );
+    // 1. Build query – omit since_id if null to get latest tweets
+    let queryUrl = `https://api.x.com/2/tweets/search/recent?query=breaking OR urgent OR developing lang:en -is:retweet min_faves:20&tweet.fields=created_at,author_id&max_results=10`;
+    if (lastSinceId) {
+      queryUrl += `&since_id=${lastSinceId}`;
+    }
+
+    const searchRes = await axios.get(queryUrl, {
+      headers: { Authorization: `Bearer ${X_BEARER}` },
+    });
 
     const tweets = searchRes.data.data || [];
     if (tweets.length === 0) {
       return NextResponse.json({ newStories: [], message: "No new tweets found" });
     }
 
-    // Update lastSinceId for next poll (keep the highest ID)
+    // Update lastSinceId to the newest tweet ID (first in results, assuming chronological)
     lastSinceId = tweets[0].id;
 
-    // 2. Process each tweet with Grok
+    // 2. Process recent tweets with Grok
     const newStories = await Promise.all(
-      tweets.slice(0, 3).map(async (tweet: any) => { // limit to 3 to save credits
+      tweets.slice(0, 3).map(async (tweet: any) => {
         try {
           const grokRes = await axios.post(
             'https://api.x.ai/v1/chat/completions',
             {
-              model: 'grok-beta', // ← Updated: use current valid model name (check x.ai docs if needed)
+              model: 'grok-beta', // Use current stable model (confirm in x.ai docs if needed)
               messages: [
                 {
                   role: 'user',
@@ -67,11 +68,11 @@ export async function GET() {
           const output = grokRes.data.choices?.[0]?.message?.content || '';
           const parsed = parseGrokOutput(output);
 
-          // 3. Auto-post to @veranewsco
+          // 3. Auto-post to @VeraNewsCo
           const tweetText = `${parsed.summary} 🚨 #VeraNews Neutralized from X sources.`;
-          console.log("Attempting to post:", tweetText);
+          console.log("Posting tweet:", tweetText);
           const postRes = await client.v2.tweet(tweetText);
-          console.log("Posted successfully:", postRes.data);
+          console.log("Posted:", postRes.data);
 
           return {
             title: parsed.title || tweet.text.slice(0, 60) + '...',
@@ -80,15 +81,20 @@ export async function GET() {
             tweetId: postRes.data.id,
           };
         } catch (innerErr: any) {
-          console.error("Error processing tweet", tweet.id, innerErr.message);
+          console.error("Error processing tweet", tweet.id, innerErr.message, innerErr.response?.data);
           return { error: innerErr.message };
         }
       })
     );
 
-    return NextResponse.json({ newStories });
+    return NextResponse.json({ newStories, lastSinceId });
   } catch (error: any) {
-    console.error("Scan-X route error:", error.message, error.response?.data);
+    console.error("Scan-X error:", error.message, error.response?.data || error);
+    // If since_id invalid, reset for next try
+    if (error.response?.data?.errors?.[0]?.message?.includes('since_id')) {
+      lastSinceId = null;
+      console.log("Invalid since_id detected – resetting for next poll");
+    }
     return NextResponse.json(
       { error: error.message, details: error.response?.data },
       { status: error.response?.status || 500 }
@@ -97,7 +103,6 @@ export async function GET() {
 }
 
 function parseGrokOutput(text: string) {
-  // Very basic parser – improve with better regex or structured output prompt
   return {
     title: text.match(/Title:\s*(.*)/i)?.[1]?.trim() || '',
     summary: text.match(/Summary:\s*(.*)/i)?.[1]?.trim() || text.trim(),
