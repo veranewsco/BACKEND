@@ -10,7 +10,7 @@ const X_ACCESS_TOKEN = process.env.X_ACCESS_TOKEN!;
 const X_ACCESS_SECRET = process.env.X_ACCESS_SECRET!;
 const GROK_API_KEY = process.env.GROK_API_KEY!;
 
-let lastSinceId: string | null = null; // Start with null to fetch recent tweets first
+let lastSinceId: string | null = null; // Start null to fetch latest tweets first
 
 const client = new TwitterApi({
   appKey: X_API_KEY,
@@ -29,8 +29,8 @@ export async function GET() {
   });
 
   try {
-    // 1. Build query – omit since_id if null to get latest tweets
-    let queryUrl = `https://api.x.com/2/tweets/search/recent?query=breaking OR urgent OR developing lang:en -is:retweet min_faves:20&tweet.fields=created_at,author_id&max_results=10`;
+    // Build query – removed min_faves:20 (invalid in your tier)
+    let queryUrl = `https://api.x.com/2/tweets/search/recent?query=breaking OR urgent OR developing lang:en -is:retweet&tweet.fields=created_at,author_id&max_results=10`;
     if (lastSinceId) {
       queryUrl += `&since_id=${lastSinceId}`;
     }
@@ -44,17 +44,16 @@ export async function GET() {
       return NextResponse.json({ newStories: [], message: "No new tweets found" });
     }
 
-    // Update lastSinceId to the newest tweet ID (first in results, assuming chronological)
-    lastSinceId = tweets[0].id;
+    lastSinceId = tweets[0].id; // Update for next poll
 
-    // 2. Process recent tweets with Grok
+    // Process tweets with Grok
     const newStories = await Promise.all(
       tweets.slice(0, 3).map(async (tweet: any) => {
         try {
           const grokRes = await axios.post(
             'https://api.x.ai/v1/chat/completions',
             {
-              model: 'grok-beta', // Use current stable model (confirm in x.ai docs if needed)
+              model: 'grok-beta',
               messages: [
                 {
                   role: 'user',
@@ -68,7 +67,6 @@ export async function GET() {
           const output = grokRes.data.choices?.[0]?.message?.content || '';
           const parsed = parseGrokOutput(output);
 
-          // 3. Auto-post to @VeraNewsCo
           const tweetText = `${parsed.summary} 🚨 #VeraNews Neutralized from X sources.`;
           console.log("Posting tweet:", tweetText);
           const postRes = await client.v2.tweet(tweetText);
@@ -81,7 +79,7 @@ export async function GET() {
             tweetId: postRes.data.id,
           };
         } catch (innerErr: any) {
-          console.error("Error processing tweet", tweet.id, innerErr.message, innerErr.response?.data);
+          console.error("Tweet processing error:", tweet.id, innerErr.message, innerErr.response?.data);
           return { error: innerErr.message };
         }
       })
@@ -90,10 +88,9 @@ export async function GET() {
     return NextResponse.json({ newStories, lastSinceId });
   } catch (error: any) {
     console.error("Scan-X error:", error.message, error.response?.data || error);
-    // If since_id invalid, reset for next try
     if (error.response?.data?.errors?.[0]?.message?.includes('since_id')) {
       lastSinceId = null;
-      console.log("Invalid since_id detected – resetting for next poll");
+      console.log("Invalid since_id – resetting");
     }
     return NextResponse.json(
       { error: error.message, details: error.response?.data },
