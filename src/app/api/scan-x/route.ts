@@ -60,7 +60,7 @@ export async function GET() {
         try {
           // Grok call
           const grokPayload = {
-            model: 'grok-beta',  // Change to 'grok-1' or check https://api.x.ai/docs if 400 persists
+            model: 'grok-4',  // Change to 'grok-1' or check https://api.x.ai/docs if 400 persists
             messages: [
               {
                 role: 'user',
