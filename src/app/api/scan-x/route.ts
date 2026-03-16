@@ -4,7 +4,6 @@ console.log("API route invoked. Env check:", {
   grok: !!process.env.GROK_API_KEY,
 });
 return NextResponse.json({ debug: "Route called - check logs" });
-
 // app/api/scan-x/route.ts
 import { NextResponse } from 'next/server';
 import axios from 'axios';
